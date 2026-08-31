@@ -1,150 +1,147 @@
-# Agents
+# My Agents (`rafa.agents`)
 
-One bar icon and one panel for every AI coding subscription on the machine.
-The panel is strictly a display: it watches the usage records that
-`omarchy-agent-usage-update` writes to `~/.local/state/omarchy/agents/usage/`
-and draws whatever appears there. `Panel.qml` owns the bar button and the
-popup; `Main.qml` discovers and watches the records (and handles the optional
-cross-device aggregation); `Agent.qml` is the per-record file watcher.
+Fork of Omarchy's **Agents** bar widget (`omarchy.agents`). One bar icon and one panel for every AI coding subscription on the machine: plan limits, tokens by day and model, prepaid balance (Fireworks), and optional cross-device sync.
+
+This is a **cloned plugin with improvements**. It does not replace the package in `/usr/share/omarchy/`. Install under `~/.config/omarchy/plugins/rafa.agents/` and use the id `rafa.agents` in your bar layout.
+
+## Differences from stock `omarchy.agents`
+
+| Area | Stock Omarchy | This fork (`rafa.agents`) |
+|---|---|---|
+| **Providers** | Claude Code, Codex, Fireworks | + **Cursor** (monthly plan limits) |
+| **Bar** | Fixed glyph (`󱚣`) via `BarIconButton` | Provider icon + text: `Codex 5h - 1%`, `Cursor 1m - 12%`, etc. |
+| **Vertical bar** | Same glyph only | Fallback icon; horizontal layout shows icon + label |
+| **Codex CLI** | Collector calls `codex` with `-a untrusted` | `bin/codex` shim maps `untrusted` → `never` (Codex CLI ≥ 0.151.0) |
+| **Usage refresh** | `omarchy-agent-usage-update` directly | `bin/usage-update`: Codex shim on `PATH` + plugin collectors |
+| **Collectors** | Omarchy package only | Stock Omarchy collectors + plugin `bin/cursor` |
+| **IPC / shell** | `omarchy-shell omarchy.agents …` | `omarchy-shell rafa.agents …` |
+
+### Cursor (new)
+
+Stock Omarchy **does not** include Cursor. This fork adds:
+
+- Collector `bin/cursor`: session token from `~/.config/Cursor/.../state.vscdb` (IDE) or `~/.config/cursor/auth.json` (`cursor-agent` / CLI)
+- `GET https://cursor.com/api/usage-summary` (same undocumented endpoint the dashboard uses)
+- Panel limits: **Cursor Models** and **Other Models**, with billing-cycle reset
+- Bar label: `Cursor 1m - N%` (`1m` = monthly; `N` = highest-used pool)
+- Icon `assets/cursor.svg`
+
+### Inline bar usage (new)
+
+The stock widget shows only the bar glyph. On the horizontal bar, this fork shows:
+
+- Active provider logo (SVG under `assets/`)
+- Short window label and percent:
+  - **Claude / Codex**: short 5-hour rolling window (`5h - N%`)
+  - **Cursor**: monthly billing cycle (`1m - N%`)
+- Tooltip with percent, window, and time until reset
+- Alarm styling (`active`) when the headline limit is ≥ 90%
+
+### Codex fix (new)
+
+The packaged Omarchy 4.0.1 collector still invokes Codex with `-a untrusted`. Recent Codex CLI versions renamed that approval value to `never` and reject the old one. This fork prepends `bin/codex` to `PATH` before the updater runs: it only translates `untrusted` → `never`; every other argument passes through unchanged.
+
+### `usage-update` wrapper (new)
+
+`Main.qml` calls `~/.config/omarchy/plugins/rafa.agents/bin/usage-update` instead of `omarchy-agent-usage-update`:
+
+1. Puts the plugin `bin/` on `PATH` (Codex shim)
+2. Runs the stock Omarchy updater (Claude, Codex, Fireworks)
+3. Runs plugin-only collectors (`cursor`)
+
+You keep official collectors updated by `omarchy update` without editing `/usr/share/omarchy/`, while adding providers only in the fork.
+
+---
 
 ## Panel
 
-- **Hero** — the mark, the tool, and the plan it runs on ("Max 20x", "Pro").
-  Auth and endpoint problems replace the plan line and repeat in a card.
-- **Subscription switch** — one chip per enabled agent (`h`/`l` or click).
-  It appears only when more than one agent is enabled.
-- **Limits** — the percentage of each allowance used, a matching meter, and
-  the time until the session or weekly window resets.
-- **Balance** — prepaid agents report a credit ledger instead of limits:
-  remaining credit, a fuel-gauge meter that drains toward empty, and
-  funded-versus-spent detail.
-- **Tokens by day** — one row per day for the last week: day, bar, tokens, with today
-  bolded at the bottom. Hover today for its prompt and session count.
-- **Tokens by model** — tokens per model with the bar behind each row scaled
-  to the heaviest model,
-  the same way the weekly chart scales to its busiest day. Hover for the
-  input / output / cache split.
+- **Hero**: mark, tool name, and plan ("Max 20x", "Pro", "Ultra").
+- **Subscription switch**: one chip per enabled agent (`h`/`l` or click); shown only when more than one is active.
+- **Limits**: percent used, meter, and time until reset (session, weekly, or monthly).
+- **Balance**: prepaid agents (Fireworks): remaining credit and spent vs. funded.
+- **Tokens by day**: last 7 days; today highlighted at the bottom.
+- **Tokens by model**: breakdown with bars scaled to the heaviest model.
 
-A subscription appears only when it is enabled in settings and has actually
-recorded usage — on this machine or on a synced one. With one such agent
-there is no switch row at all; with none, the module leaves the bar entirely
-rather than sitting there with nothing to say. A CLI installed mid-session
-shows up at the next refresh, so nothing polls the disk waiting for it.
+A provider appears only when enabled in settings and has data (locally or via sync). With nothing to show, the module leaves the bar entirely. To drop the stock widget and use only this fork:
 
-That self-hiding is why the widget ships in the default bar layout: a machine
-that has never run an AI coding agent draws nothing, and the icon arrives on
-its own the first time a scan finds usage. Drop it with
-`omarchy plugin disable omarchy.agents`.
+```bash
+omarchy plugin disable omarchy.agents
+```
 
 ## Data
 
-Each agent is one JSON record in `~/.local/state/omarchy/agents/usage/`,
-written by `omarchy-agent-usage-update`. That command runs one
-`omarchy-agent-usage-<agent>` collector per agent; the widget invokes it
-on its refresh timer and whenever you ask for a refresh, and picks up any
-record that lands in the directory regardless of who wrote it.
-
-Adding an agent therefore never touches this plugin: ship a collector that
-prints the record contract (see the `claude` and `codex` collectors in
-`bin/`), and the panel gains a tab. An `assets/<id>.svg` mark is optional —
-with an `assets/<id>-light.svg` twin if the mark needs a dark variant for
-light surfaces — and the bar glyph stands in when there is none.
+Each agent is one JSON file in `~/.local/state/omarchy/agents/usage/`, written by the updater. The panel only reads those records.
 
 | Collector | Limits | Local stats |
 |---|---|---|
-| `claude` | Anthropic's OAuth usage endpoint (5-hour session + 7-day weekly) | `~/.claude/projects` transcripts, opencode sessions on an Anthropic provider, plus `stats-cache.json` and `history.jsonl` as fallback |
-| `codex` | The Codex app-server RPC | native Codex CLI session files (plus pi and opencode sessions) |
-| `fireworks` | Estimated prepaid balance: configured funding minus rated account costs | Fireworks billing API, grouped by day and model for the last 30 days |
+| `claude` | Anthropic OAuth (5h session + 7-day weekly) | `~/.claude/projects`, opencode, fallbacks |
+| `codex` | Codex app-server RPC | native sessions + pi/omp/opencode |
+| `fireworks` | Estimated prepaid balance | billing API (last 30 days) |
+| **`cursor`** | **Monthly pools (Cursor Models + Other Models)** | **None** (plan limits only) |
 
-Claude limits need a signed-in CLI; without credentials the panel says so and
-falls back to local stats only. A non-default Claude directory is honored via
-`CLAUDE_CONFIG_DIR`, Codex via `CODEX_HOME`. Fireworks reads
-`FIREWORKS_API_KEY` and `FIREWORKS_ACCOUNT_ID` first, then
-`~/.fireworks/auth.ini` (which `firectl set-api-key` creates), then the key
-opencode stores in `~/.local/share/opencode/auth.json` when Fireworks is
-signed in there.
+Claude: `CLAUDE_CONFIG_DIR`. Codex: `CODEX_HOME`. Fireworks: `FIREWORKS_API_KEY`, `firectl`, opencode. Cursor: IDE or `cursor-agent`; overrides `CURSOR_DB_PATH` / `CURSOR_AGENT_AUTH_PATH`.
 
 ### Fireworks balance
 
-The collector first asks the account's `:getBalance` endpoint for the real
-prepaid ledger. That endpoint exists but is permission-gated, and as of
-August 2026 no console-issued API key passes it — Fireworks appears to
-reserve it for the dashboard session. The probe stays because it is cheap
-and the live figure lights up automatically if Fireworks ever opens it to
-keys. Until then the collector falls back to estimating the balance from
-configuration in `~/.config/omarchy/agents/fireworks.json`:
-
-```json
-{
-  "accountId": "",
-  "fundedAmount": 20,
-  "fundedAt": "2026-07-01"
-}
-```
-
-Set `fundedAmount` to the credits purchased and optionally `fundedAt` to the
-purchase date; with no date, the collector uses the account creation time. It
-subtracts rated account costs and the panel labels the result as estimated.
-For a later top-up, increase `fundedAmount` by the new credit while keeping
-the original `fundedAt`, so both the funding and spend still cover the same
-period. `accountId` only matters when one API key can access several
-accounts. Without a configured `fundedAmount` the tab still shows token
-usage, just no balance. With a live ledger, `fundedAmount` is optional and
-only adds the meter and the spent-of-funded line under the real figure.
+Same as stock: tries `:getBalance`; on failure, estimates from `~/.config/omarchy/agents/fireworks.json` (`fundedAmount`, `fundedAt`, etc.).
 
 ## Interactions
 
-- Bar icon: left = panel, right = launch agent, middle = next subscription.
-- Panel: `h`/`l` switch subscription, `j`/`k` scroll, `r` or Enter refresh,
-  Tab moves to the neighboring bar panel, Esc closes.
-- IPC: `omarchy-shell omarchy.agents <open|close|toggle|refresh|next>`.
+- Bar: click = panel; right-click = agent launcher; middle-click = next provider.
+- Panel: `h`/`l` switch provider, `j`/`k` scroll, `r` or Enter refresh, Tab = neighbor panel, Esc close.
+- IPC: `omarchy-shell rafa.agents <open|close|toggle|refresh|next>`.
 
 ## Settings
 
-Settings live in the widget's entry in `~/.config/omarchy/shell.json`. The
-top-level keys can be set with
-`omarchy bar set omarchy.agents <key> <value>`:
-
-| Key | Default | What it does |
-|---|---|---|
-| `refreshIntervalSec` | `900` | How often the usage records regenerate |
-| `syncMode` | `"Off"` | `"On"` writes this machine's snapshot and merges the others |
-| `syncDir` | `""` | A folder synced by Syncthing, Dropbox, rsync, … |
-| `syncFileName` | `<hostname>.json` | This machine's snapshot file |
-| `syncDeviceId` | hostname | Stable device name inside the snapshot |
-
-Numbers need `--json`, or they land in `shell.json` as strings:
+Configured in `~/.config/omarchy/shell.json` under id `rafa.agents`:
 
 ```bash
-omarchy bar set omarchy.agents refreshIntervalSec 300 --json
-omarchy bar set omarchy.agents syncDir '~/Sync/agent-usage'
+omarchy bar set rafa.agents refreshIntervalSec 300 --json
+omarchy bar set rafa.agents syncDir '~/Sync/agent-usage'
 ```
 
-Per-agent enablement is nested, and `set` writes its key literally rather
-than walking a dotted path — so pass the whole `providers` object as JSON (or
-edit `shell.json` directly):
+Per-provider enablement (includes `cursor`):
 
 ```bash
-omarchy bar set omarchy.agents providers '{
+omarchy bar set rafa.agents providers '{
   "claude": { "enabled": true },
-  "codex": { "enabled": false },
-  "fireworks": { "enabled": true }
+  "codex": { "enabled": true },
+  "fireworks": { "enabled": true },
+  "cursor": { "enabled": true }
 }' --json
 ```
 
-`enabled` defaults to `true` for every discovered agent; set it to `false` to
-hide a subscription that is installed. Disabled agents are also skipped when
-the records regenerate.
+| Key | Default | What it does |
+|---|---|---|
+| `refreshIntervalSec` | `900` | How often usage records regenerate |
+| `syncMode` | `"Off"` | `"On"` merges snapshots from other machines |
+| `syncDir` | `""` | Sync folder (Syncthing, Dropbox, …) |
+| `syncFileName` | `<hostname>.json` | This machine's snapshot file |
+| `syncDeviceId` | hostname | Stable device id inside aggregates |
 
-With `syncMode` on, every `*.json` snapshot in `syncDir` is merged, so today,
-the last 7 days, and the all-time totals cover every machine you code on —
-active days are unioned by date rather than summed. Rate limits stay
-per-account and are never merged. A record may declare `"scope": "account"`
-when its stats are account-global rather than machine-local (Fireworks'
-billing API); those merge by taking the widest value instead of summing, so
-the same account synced from two machines is not counted twice.
+With `syncMode` on, day and model totals are unioned by date; **rate limits are never merged** (they stay per-account).
 
-One caveat on "all-time": the Codex collector only reads native session files
-touched in the last 30 days, and Fireworks requests the last 30 days from its
-billing API, so their totals and day counts cover that window. Claude's cover
-every transcript still on disk.
+**All-time caveat:** Codex and Fireworks cover roughly the last 30 days from their APIs; Claude uses every transcript still on disk.
+
+## Install
+
+```bash
+git clone https://github.com/RafaelGoulartB/omarchy-ai-usage.git \
+  ~/.config/omarchy/plugins/rafa.agents
+```
+
+In `shell.json`, replace `omarchy.agents` with `rafa.agents` in the bar layout (or add the id). Restart the shell:
+
+```bash
+omarchy restart shell
+```
+
+Refresh usage manually:
+
+```bash
+bash ~/.config/omarchy/plugins/rafa.agents/bin/usage-update
+```
+
+## License
+
+MIT. Fork of Omarchy's Agents widget.
