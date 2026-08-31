@@ -41,7 +41,6 @@ Panel {
   readonly property var limits: limitWindows(provider)
   readonly property var models: modelRows(provider)
   readonly property var headline: bindingWindow(provider)
-  readonly property var fiveHour: fiveHourWindow(provider)
   readonly property var balance: provider ? (provider.balance || null) : null
   // A prepaid account runs low the way a subscription window fills up: the
   // last 10% of the funded credits lights the same alarm.
@@ -151,10 +150,30 @@ Panel {
     return null
   }
 
+  // Bar glyph: one short window label and the usage percent for the active
+  // provider. Cursor bills monthly; Claude and Codex lead with their short
+  // rolling session windows.
+  function barWindowForProvider(p) {
+    if (!p) return null
+    var id = String(p.providerId || "")
+    if (id === "cursor") {
+      var headline = bindingWindow(p)
+      if (headline && headline.percent >= 0)
+        return { abbrev: "1m", percent: headline.percent, resetAt: headline.resetAt || "" }
+      return null
+    }
+    var five = fiveHourWindow(p)
+    if (five) return { abbrev: "5h", percent: five.percent, resetAt: five.resetAt || "" }
+    return null
+  }
+
+  readonly property var barWindow: barWindowForProvider(provider)
+
   function providerShortName(p) {
     var name = String(p && p.providerName || "Provider")
     if (name.indexOf("Claude") >= 0) return "Claude"
     if (name.indexOf("Codex") >= 0) return "Codex"
+    if (name.indexOf("Cursor") >= 0) return "Cursor"
     return name
   }
 
@@ -176,17 +195,20 @@ Panel {
   readonly property string barLabel: {
     if (!provider) return ""
     var text = providerShortName(provider)
-    if (fiveHour) text += " 5h - " + Math.round(clamp(fiveHour.percent, 0, 1) * 100) + "%"
+    if (barWindow)
+      text += " " + barWindow.abbrev + " - " + Math.round(clamp(barWindow.percent, 0, 1) * 100) + "%"
     return text
   }
 
   readonly property string barTooltip: {
     if (!provider) return "AI usage"
     var text = providerShortName(provider)
-    if (fiveHour)
-      text += " · " + Math.round(clamp(fiveHour.percent, 0, 1) * 100) + "% used in 5h"
-    else
-      text += " · 5h limit unavailable"
+    if (barWindow) {
+      text += " · " + Math.round(clamp(barWindow.percent, 0, 1) * 100) + "% used in " + barWindow.abbrev
+      var resetMs = resetMsFor(barWindow)
+      if (resetMs > 0) text += " · resets in " + formatDuration(resetMs)
+    } else
+      text += " · limit unavailable"
     if (providers.length > 1) text += "\nAvailable: " + providerNames()
     return text
   }

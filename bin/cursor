@@ -1,0 +1,426 @@
+#!/usr/bin/python3
+"""Collect Cursor plan usage into one display-ready JSON record.
+
+Reads the session token from the Cursor IDE state database or cursor-agent
+auth.json, then queries the undocumented dashboard endpoint
+GET https://cursor.com/api/usage-summary for the two included-usage pools
+(Cursor Models and Other Models).
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime as dt
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+AGENT_ID = "cursor"
+AGENT_NAME = "Cursor"
+AUTH_HELP = "Sign in to the Cursor IDE or run `cursor-agent` to restore usage."
+USAGE_URL = "https://cursor.com/api/usage-summary"
+PROBE_MIN_INTERVAL_SECONDS = 15
+TOKEN_KEY = "cursorAuth/accessToken"
+BROWSER_UA = (
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def expand_path(value: str) -> Path:
+  return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+
+
+def default_db_path() -> Path:
+  config = os.environ.get("XDG_CONFIG_HOME")
+  base = expand_path(config) if config else expand_path("~/.config")
+  return base / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+
+
+def default_agent_auth_path() -> Path:
+  config = os.environ.get("XDG_CONFIG_HOME")
+  base = expand_path(config) if config else expand_path("~/.config")
+  return base / "cursor" / "auth.json"
+
+
+def cache_root() -> Path:
+  root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omarchy" / "agent-usage"
+  root.mkdir(parents=True, exist_ok=True)
+  return root
+
+
+def number(value: Any) -> int:
+  try:
+    return round(float(value or 0))
+  except Exception:
+    return 0
+
+
+def jwt_claims(token: str) -> dict[str, Any] | None:
+  parts = token.split(".")
+  if len(parts) < 2:
+    return None
+  payload = parts[1]
+  padding = "=" * (-len(payload) % 4)
+  try:
+    raw = base64.urlsafe_b64decode(payload + padding)
+    data = json.loads(raw.decode("utf-8", errors="replace"))
+    return data if isinstance(data, dict) else None
+  except Exception:
+    return None
+
+
+def session_auth(token: str) -> tuple[str, str, str] | None:
+  claims = jwt_claims(token)
+  if not claims:
+    return None
+  sub = str(claims.get("sub") or "")
+  user_id = sub.split("|", 1)[1] if "|" in sub else ""
+  if not user_id:
+    return None
+  account_key = f"{hashlib.sha1(user_id.encode('utf-8')).hexdigest()[:16]}"
+  cookie_value = f"{user_id}%3A%3A{token}"
+  return user_id, account_key, cookie_value
+
+
+def read_access_token(path: Path) -> str:
+  if not path.is_file():
+    raise FileNotFoundError(str(path))
+  conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+  try:
+    row = conn.execute("SELECT value FROM ItemTable WHERE key = ?", (TOKEN_KEY,)).fetchone()
+  finally:
+    conn.close()
+  if not row or not str(row[0]).strip():
+    raise ValueError("missing token")
+  return str(row[0]).strip()
+
+
+def read_agent_access_token(path: Path) -> str:
+  data = json.loads(path.read_text(encoding="utf-8"))
+  token = str(data.get("accessToken") or "").strip()
+  if not token:
+    raise ValueError("missing accessToken")
+  return token
+
+
+def resolve_access_token(db_path: Path, agent_auth_path: Path) -> str:
+  try:
+    return read_access_token(db_path)
+  except Exception:
+    if not db_path.is_file() and agent_auth_path.is_file():
+      return read_agent_access_token(agent_auth_path)
+    raise
+
+
+def read_fresh_json(path: Path, max_age_seconds: float) -> dict[str, Any] | None:
+  if max_age_seconds <= 0 or not path.exists():
+    return None
+  try:
+    if time.time() - path.stat().st_mtime <= max_age_seconds:
+      return json.loads(path.read_text(encoding="utf-8"))
+  except Exception:
+    return None
+  return None
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+  handle_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+  tmp = Path(tmp_name)
+  try:
+    with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+      handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+    tmp.chmod(0o644)
+    tmp.replace(path)
+  except BaseException:
+    tmp.unlink(missing_ok=True)
+    raise
+
+
+def title_case_plan(value: str) -> str:
+  text = str(value or "").strip()
+  if not text:
+    return "Cursor"
+  return text[0].upper() + text[1:]
+
+
+def pct_value(field: str, value: Any) -> float:
+  try:
+    n = float(value)
+  except Exception:
+    raise ValueError(f"invalid {field}")
+  if not (n >= 0) or n != n:
+    raise ValueError(f"invalid {field}")
+  rounded = max(0.0, round(n))
+  return min(1.0, rounded / 100.0)
+
+
+def parse_percent_from_message(msg: str) -> float | None:
+  idx = msg.find("%")
+  if idx < 0:
+    return None
+  before = msg[:idx]
+  start = 0
+  for i in range(len(before) - 1, -1, -1):
+    ch = before[i]
+    if not (ch.isdigit() or ch == "."):
+      start = i + 1
+      break
+  try:
+    return float(before[start:])
+  except Exception:
+    return None
+
+
+def normalize_reset_at(value: Any) -> str:
+  if value is None:
+    return ""
+  raw = str(value).strip()
+  if not raw:
+    return ""
+  try:
+    parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    return parsed.isoformat()
+  except Exception:
+    return raw
+
+
+def limit_entry(label: str, percent: float, resets_at: str, title: str = "") -> dict[str, Any]:
+  return {
+    "label": label,
+    "title": title or label,
+    "percent": percent,
+    "resetsAt": resets_at,
+  }
+
+
+def parse_usage_summary(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]], bool]:
+  reset_at = normalize_reset_at(payload.get("billingCycleEnd"))
+  plan = title_case_plan(str(payload.get("membershipType") or ""))
+  unlimited = bool(payload.get("isUnlimited"))
+
+  if unlimited:
+    return plan, [], True
+
+  individual = payload.get("individualUsage") if isinstance(payload.get("individualUsage"), dict) else {}
+  plan_usage = individual.get("plan") if isinstance(individual.get("plan"), dict) else None
+
+  if plan_usage:
+    auto = pct_value("autoPercentUsed", plan_usage.get("autoPercentUsed"))
+    api = pct_value("apiPercentUsed", plan_usage.get("apiPercentUsed"))
+    limits = [
+      limit_entry("Cursor Models", auto, reset_at, "Cursor Models"),
+      limit_entry("Other Models", api, reset_at, "Other Models"),
+    ]
+    return plan, limits, False
+
+  auto_msg = payload.get("autoModelSelectedDisplayMessage")
+  api_msg = payload.get("namedModelSelectedDisplayMessage")
+  if isinstance(auto_msg, str) and isinstance(api_msg, str):
+    auto_raw = parse_percent_from_message(auto_msg)
+    api_raw = parse_percent_from_message(api_msg)
+    if auto_raw is not None and api_raw is not None:
+      limits = [
+        limit_entry("Cursor Models", pct_value("autoModelSelectedDisplayMessage", auto_raw), reset_at, "Cursor Models"),
+        limit_entry("Other Models", pct_value("namedModelSelectedDisplayMessage", api_raw), reset_at, "Other Models"),
+      ]
+      return f"{plan} (team)", limits, False
+
+  raise ValueError("usage-summary has no recognizable plan usage")
+
+
+def probe_limits(cookie_value: str) -> dict[str, Any]:
+  request = urllib.request.Request(
+    USAGE_URL,
+    headers={
+      "Cookie": f"WorkosCursorSessionToken={cookie_value}",
+      "Origin": "https://cursor.com",
+      "Referer": "https://cursor.com/dashboard",
+      "User-Agent": BROWSER_UA,
+      "Accept": "application/json",
+    },
+  )
+  try:
+    with urllib.request.urlopen(request, timeout=10) as response:
+      payload = json.loads(response.read().decode("utf-8", errors="replace"))
+  except urllib.error.HTTPError as error:
+    if error.code in (401, 403):
+      return {
+        "ok": False,
+        "helpText": "Cursor authentication failed. Sign in to Cursor again.",
+      }
+    return {
+      "ok": False,
+      "helpText": f"Cursor usage endpoint returned status {error.code}.",
+    }
+  except Exception:
+    return {
+      "ok": False,
+      "transport": True,
+      "helpText": "Couldn't reach Cursor's usage endpoint. Retrying shortly.",
+    }
+
+  if not isinstance(payload, dict):
+    return {"ok": False, "helpText": "Cursor usage endpoint returned an unexpected payload."}
+
+  try:
+    plan, limits, unlimited = parse_usage_summary(payload)
+  except Exception as exc:
+    return {"ok": False, "helpText": f"Cursor usage payload could not be parsed: {exc}"}
+
+  if unlimited:
+    return {
+      "ok": True,
+      "plan": plan,
+      "limits": [],
+      "usageStatusText": "Unlimited plan",
+      "unlimited": True,
+    }
+
+  if not limits:
+    return {"ok": False, "helpText": "Cursor usage endpoint returned no limits."}
+
+  return {"ok": True, "plan": plan, "limits": limits, "unlimited": False}
+
+
+def limit_window_open(entry: dict[str, Any], now: dt.datetime) -> bool:
+  raw = str(entry.get("resetsAt") or "")
+  if not raw:
+    return True
+  try:
+    resets_at = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+  except Exception:
+    return True
+  if resets_at.tzinfo is None:
+    resets_at = resets_at.replace(tzinfo=dt.timezone.utc)
+  return resets_at > now
+
+
+def usable_cached_limits(cached: dict[str, Any]) -> list[dict[str, Any]]:
+  entries = cached.get("limits")
+  if not isinstance(entries, list):
+    return []
+  now = dt.datetime.now(dt.timezone.utc)
+  return [entry for entry in entries if isinstance(entry, dict) and limit_window_open(entry, now)]
+
+
+def collect_limits(auth: tuple[str, str, str], force: bool) -> dict[str, Any]:
+  _, account_key, cookie_value = auth
+  result = {
+    "limits": [],
+    "tierLabel": "",
+    "usageStatusText": "",
+    "authHelpText": AUTH_HELP,
+    "unlimited": False,
+  }
+
+  probe_cache = cache_root() / "cursor-limits.json"
+  cached = read_fresh_json(probe_cache, float("inf")) or {}
+  fallback = usable_cached_limits(cached) if cached.get("accountKey") == account_key else []
+
+  if fallback and not force and time.time() - number(cached.get("fetchedAtMs")) / 1000 < PROBE_MIN_INTERVAL_SECONDS:
+    result["limits"] = fallback
+    result["tierLabel"] = str(cached.get("plan") or "")
+    result["unlimited"] = bool(cached.get("unlimited"))
+    if result["unlimited"]:
+      result["usageStatusText"] = "Unlimited plan"
+    return result
+
+  probe = probe_limits(cookie_value)
+  if probe["ok"]:
+    result["limits"] = probe.get("limits") or []
+    result["tierLabel"] = str(probe.get("plan") or "")
+    result["unlimited"] = bool(probe.get("unlimited"))
+    if probe.get("usageStatusText"):
+      result["usageStatusText"] = str(probe["usageStatusText"])
+    write_json(
+      probe_cache,
+      {
+        "fetchedAtMs": round(time.time() * 1000),
+        "accountKey": account_key,
+        "plan": result["tierLabel"],
+        "limits": result["limits"],
+        "unlimited": result["unlimited"],
+      },
+    )
+    return result
+
+  if probe.get("transport"):
+    result["retryAdvised"] = True
+  if fallback:
+    result["limits"] = fallback
+    result["tierLabel"] = str(cached.get("plan") or "")
+    result["unlimited"] = bool(cached.get("unlimited"))
+  else:
+    result["usageStatusText"] = "Cursor limits unavailable"
+    result["authHelpText"] = str(probe.get("helpText") or AUTH_HELP)
+  return result
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--force", action="store_true")
+  parser.add_argument("--limits-only", action="store_true")
+  parser.add_argument("--cache-seconds", type=float, default=20)
+  args = parser.parse_args()
+
+  db_path = expand_path(os.environ.get("CURSOR_DB_PATH") or str(default_db_path()))
+  agent_auth_path = expand_path(os.environ.get("CURSOR_AGENT_AUTH_PATH") or str(default_agent_auth_path()))
+
+  try:
+    token = resolve_access_token(db_path, agent_auth_path)
+    auth = session_auth(token)
+    if not auth:
+      raise ValueError("token shape")
+  except Exception:
+    record = {
+      "schemaVersion": 1,
+      "id": AGENT_ID,
+      "name": AGENT_NAME,
+      "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+      "ready": False,
+      "hasLocalStats": False,
+      "usageStatusText": "Waiting for auth",
+      "authHelpText": (
+        "No Cursor session found. Open the Cursor IDE and sign in, "
+        "or run `cursor-agent` and sign in, then refresh."
+      ),
+      "limits": [],
+    }
+    print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+    return 0
+
+  limits = collect_limits(auth, args.force)
+
+  record = {
+    "schemaVersion": 1,
+    "id": AGENT_ID,
+    "name": AGENT_NAME,
+    "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "ready": len(limits["limits"]) > 0 or limits.get("unlimited"),
+    "hasLocalStats": False,
+    "tierLabel": limits["tierLabel"],
+    "usageStatusText": limits["usageStatusText"],
+    "authHelpText": limits["authHelpText"],
+    "limits": limits["limits"],
+  }
+  if limits.get("retryAdvised"):
+    record["retryAdvised"] = True
+  if limits.get("unlimited"):
+    record["unlimited"] = True
+
+  print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

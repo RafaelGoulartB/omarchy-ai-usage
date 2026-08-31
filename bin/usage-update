@@ -2,10 +2,59 @@
 set -euo pipefail
 
 # Reuse Omarchy's maintained collectors and updater, while putting the clone's
-# Codex compatibility shim first in PATH. This keeps all output in the normal
-# usage directory watched by Main.qml.
+# Codex compatibility shim first in PATH. Plugin-specific collectors (cursor)
+# run after the stock updater.
 plugin_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export PATH="$plugin_dir:$PATH"
 export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 
-exec "$OMARCHY_PATH/bin/omarchy-agent-usage-update" "$@"
+USAGE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+mkdir -p "$USAGE_DIR"
+
+flags=()
+only=()
+declare -A excluded
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --force | --limits-only) flags+=("$1") ;;
+  --except)
+    excluded[$2]=1
+    shift
+    ;;
+  *) only+=("$1") ;;
+  esac
+  shift
+done
+
+wanted() {
+  local agent="$1"
+  [[ -n "${excluded[$agent]:-}" ]] && return 1
+  (( ${#only[@]} == 0 )) && return 0
+  local candidate
+  for candidate in "${only[@]}"; do
+    [[ $candidate == "$agent" ]] && return 0
+  done
+  return 1
+}
+
+collect() {
+  local collector="$1" agent="$2"
+  local record tmp
+  if ! record=$("$collector" "${flags[@]}") || [[ -z $record ]] || ! jq -e . >/dev/null 2>&1 <<<"$record"; then
+    echo "rafa.agents usage-update: $agent collector failed" >&2
+    return 1
+  fi
+  tmp=$(mktemp "$USAGE_DIR/.$agent.XXXXXX")
+  printf '%s\n' "$record" >"$tmp"
+  mv "$tmp" "$USAGE_DIR/$agent.json"
+}
+
+status=0
+"$OMARCHY_PATH/bin/omarchy-agent-usage-update" "${flags[@]}" "${only[@]}" || status=1
+
+if wanted cursor; then
+  collect "$plugin_dir/cursor" cursor || status=1
+fi
+
+exit $status
