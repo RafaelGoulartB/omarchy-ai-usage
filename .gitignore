@@ -1,0 +1,20 @@
+# Editors & IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+Thumbs.db
+
+# Local backups (shell.json / config edits)
+*.bak
+*.bak.*
+
+# Local secrets — never commit
+.env
+.env.local
+*.credentials.json

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The Omarchy 4.0.1 Codex collector still sends `-a untrusted`. Codex CLI
+# 0.151.0 renamed that approval value to `never`; translate only that value and
+# pass every other argument through unchanged.
+wrapper_path="$(realpath -- "$0")"
+real_codex=""
+while IFS= read -r candidate; do
+  [[ -x "$candidate" ]] || continue
+  [[ "$(realpath -- "$candidate")" == "$wrapper_path" ]] && continue
+  real_codex="$candidate"
+  break
+done < <(type -P -a codex 2>/dev/null || true)
+
+if [[ -z "$real_codex" ]]; then
+  echo "rafa.agents: real codex executable not found" >&2
+  exit 127
+fi
+
+translated=()
+while (($#)); do
+  case "$1" in
+    -a|--ask-for-approval)
+      translated+=("$1")
+      shift
+      if (($#)) && [[ "$1" == "untrusted" ]]; then
+        translated+=("never")
+      elif (($#)); then
+        translated+=("$1")
+      fi
+      ;;
+    --ask-for-approval=untrusted)
+      translated+=("--ask-for-approval=never")
+      ;;
+    *)
+      translated+=("$1")
+      ;;
+  esac
+  shift
+done
+
+exec "$real_codex" "${translated[@]}"

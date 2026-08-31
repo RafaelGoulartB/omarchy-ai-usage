@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Reuse Omarchy's maintained collectors and updater, while putting the clone's
+# Codex compatibility shim first in PATH. This keeps all output in the normal
+# usage directory watched by Main.qml.
+plugin_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export PATH="$plugin_dir:$PATH"
+export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
+
+exec "$OMARCHY_PATH/bin/omarchy-agent-usage-update" "$@"
