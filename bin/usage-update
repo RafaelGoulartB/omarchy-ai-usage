@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Reuse Omarchy's maintained collectors and updater, while putting the clone's
-# Codex compatibility shim first in PATH. Plugin-specific collectors (cursor)
+# Codex compatibility shim first in PATH. Plugin-specific collectors (Cursor
+# and Kiro CLI)
 # run after the stock updater.
 plugin_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export PATH="$plugin_dir:$PATH"
@@ -55,6 +56,10 @@ status=0
 
 if wanted cursor; then
   collect "$plugin_dir/cursor" cursor || status=1
+fi
+
+if wanted kiro; then
+  collect "$plugin_dir/kiro" kiro || status=1
 fi
 
 exit $status

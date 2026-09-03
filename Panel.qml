@@ -150,13 +150,99 @@ Panel {
     return null
   }
 
+  function weeklyWindow(p) {
+    if (!p) return null
+    var list = p.limits || []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i] || {}
+      var label = String(entry.label || "") + " " + String(entry.title || "")
+      var lower = label.toLowerCase()
+      if (lower.indexOf("fable") >= 0) continue
+      if (windowIsLong(label) && windowSpanMs(label) === 7 * 24 * 3600 * 1000) {
+        return {
+          percent: Number(entry.percent),
+          resetAt: String(entry.resetsAt || "")
+        }
+      }
+    }
+    return null
+  }
+
+  function fableWindow(p) {
+    if (!p) return null
+    var list = p.limits || []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i] || {}
+      var label = String(entry.label || "") + " " + String(entry.title || "")
+      if (label.toLowerCase().indexOf("fable") >= 0) {
+        return {
+          percent: Number(entry.percent),
+          resetAt: String(entry.resetsAt || "")
+        }
+      }
+    }
+    return null
+  }
+
+  function barUsagePercent(percent) {
+    return Math.round(clamp(Number(percent), 0, 1) * 100) + "%"
+  }
+
+  function barUsagePercentValue(percent) {
+    return Math.round(clamp(Number(percent), 0, 1) * 100)
+  }
+
+  function barLimitSegmentCompact(abbrev, window) {
+    if (!window || window.percent < 0) return ""
+    return abbrev + barUsagePercentValue(window.percent)
+  }
+
+  function sessionWeekBarSegments(p) {
+    var parts = []
+    var five = fiveHourWindow(p)
+    var week = weeklyWindow(p)
+    if (five) parts.push(barLimitSegmentCompact("5h", five))
+    if (week) parts.push(barLimitSegmentCompact("1w", week))
+    return parts
+  }
+
+  function claudeBarSegments(p) {
+    var parts = sessionWeekBarSegments(p)
+    var fable = fableWindow(p)
+    if (fable) parts.push(barLimitSegmentCompact("f", fable))
+    return parts
+  }
+
+  function sessionWeekBarTooltip(p) {
+    var lines = []
+    var five = fiveHourWindow(p)
+    var week = weeklyWindow(p)
+    if (five) lines.push("5h: " + barUsagePercent(five.percent) + tooltipResetSuffix(five))
+    if (week) lines.push("1w: " + barUsagePercent(week.percent) + tooltipResetSuffix(week))
+    return lines.join("\n")
+  }
+
+  function claudeBarTooltip(p) {
+    var lines = []
+    var base = sessionWeekBarTooltip(p)
+    var fable = fableWindow(p)
+    if (base !== "") lines.push(base)
+    if (fable) lines.push("Fable: " + barUsagePercent(fable.percent) + tooltipResetSuffix(fable))
+    return lines.join("\n")
+  }
+
+  function tooltipResetSuffix(window) {
+    var resetMs = resetMsFor(window)
+    return resetMs > 0 ? " · resets in " + formatDuration(resetMs) : ""
+  }
+
   // Bar glyph: one short window label and the usage percent for the active
-  // provider. Cursor bills monthly; Claude and Codex lead with their short
-  // rolling session windows.
+  // provider. Cursor and Kiro bill monthly; Claude and Codex lead with their
+  // short rolling session windows.
   function barWindowForProvider(p) {
     if (!p) return null
     var id = String(p.providerId || "")
-    if (id === "cursor") {
+    if (id === "cursor" || id === "kiro") {
       var headline = bindingWindow(p)
       if (headline && headline.percent >= 0)
         return { abbrev: "1m", percent: headline.percent, resetAt: headline.resetAt || "" }
@@ -174,6 +260,7 @@ Panel {
     if (name.indexOf("Claude") >= 0) return "Claude"
     if (name.indexOf("Codex") >= 0) return "Codex"
     if (name.indexOf("Cursor") >= 0) return "Cursor"
+    if (name.indexOf("Kiro") >= 0) return "Kiro"
     return name
   }
 
@@ -195,16 +282,27 @@ Panel {
   readonly property string barLabel: {
     if (!provider) return ""
     var text = providerShortName(provider)
+    var id = String(provider.providerId || "")
+    if (id === "claude" || id === "codex") {
+      var parts = id === "claude" ? claudeBarSegments(provider) : sessionWeekBarSegments(provider)
+      if (parts.length > 0) text += " " + parts.join(" ")
+      return text
+    }
     if (barWindow)
-      text += " " + barWindow.abbrev + " - " + Math.round(clamp(barWindow.percent, 0, 1) * 100) + "%"
+      text += " " + barWindow.abbrev + " - " + barUsagePercent(barWindow.percent)
     return text
   }
 
   readonly property string barTooltip: {
     if (!provider) return "AI usage"
     var text = providerShortName(provider)
-    if (barWindow) {
-      text += " · " + Math.round(clamp(barWindow.percent, 0, 1) * 100) + "% used in " + barWindow.abbrev
+    var id = String(provider.providerId || "")
+    if (id === "claude" || id === "codex") {
+      var compactLines = id === "claude" ? claudeBarTooltip(provider) : sessionWeekBarTooltip(provider)
+      if (compactLines !== "") text += "\n" + compactLines
+      else text += " · limit unavailable"
+    } else if (barWindow) {
+      text += " · " + barUsagePercent(barWindow.percent) + " used in " + barWindow.abbrev
       var resetMs = resetMsFor(barWindow)
       if (resetMs > 0) text += " · resets in " + formatDuration(resetMs)
     } else

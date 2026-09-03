@@ -8,12 +8,12 @@ This is a **cloned plugin with improvements**. It does not replace the package i
 
 | Area | Stock Omarchy | This fork (`rafa.agents`) |
 |---|---|---|
-| **Providers** | Claude Code, Codex, Fireworks | + **Cursor** (monthly plan limits) |
+| **Providers** | Claude Code, Codex, Fireworks | + **Cursor** and **Kiro CLI** (monthly plan limits) |
 | **Bar** | Fixed glyph (`󱚣`) via `BarIconButton` | Provider icon + text: `Codex 5h - 1%`, `Cursor 1m - 12%`, etc. |
 | **Vertical bar** | Same glyph only | Fallback icon; horizontal layout shows icon + label |
 | **Codex CLI** | Collector calls `codex` with `-a untrusted` | `bin/codex` shim maps `untrusted` → `never` (Codex CLI ≥ 0.151.0) |
 | **Usage refresh** | `omarchy-agent-usage-update` directly | `bin/usage-update`: Codex shim on `PATH` + plugin collectors |
-| **Collectors** | Omarchy package only | Stock Omarchy collectors + plugin `bin/cursor` |
+| **Collectors** | Omarchy package only | Stock Omarchy collectors + plugin `bin/cursor` and `bin/kiro` |
 | **IPC / shell** | `omarchy-shell omarchy.agents …` | `omarchy-shell rafa.agents …` |
 
 ### Cursor (new)
@@ -26,6 +26,16 @@ Stock Omarchy **does not** include Cursor. This fork adds:
 - Bar label: `Cursor 1m - N%` (`1m` = monthly; `N` = highest-used pool)
 - Icon `assets/cursor.svg`
 
+### Kiro CLI (new)
+
+Stock Omarchy **does not** include Kiro CLI. This fork adds:
+
+- Collector `bin/kiro`: reuses the authenticated Kiro CLI session from `~/.local/share/kiro-cli/data.sqlite3`
+- The same `GetUsageLimits` operation used by Kiro CLI's `/usage` panel
+- Monthly credit usage and billing-cycle reset in the panel
+- Bar label: `Kiro 1m - N%`
+- Official Kiro mark under `assets/kiro.svg`
+
 ### Inline bar usage (new)
 
 The stock widget shows only the bar glyph. On the horizontal bar, this fork shows:
@@ -33,7 +43,7 @@ The stock widget shows only the bar glyph. On the horizontal bar, this fork show
 - Active provider logo (SVG under `assets/`)
 - Short window label and percent:
   - **Claude / Codex**: short 5-hour rolling window (`5h - N%`)
-  - **Cursor**: monthly billing cycle (`1m - N%`)
+  - **Cursor / Kiro**: monthly billing cycle (`1m - N%`)
 - Tooltip with percent, window, and time until reset
 - Alarm styling (`active`) when the headline limit is ≥ 90%
 
@@ -47,7 +57,7 @@ The packaged Omarchy 4.0.1 collector still invokes Codex with `-a untrusted`. Re
 
 1. Puts the plugin `bin/` on `PATH` (Codex shim)
 2. Runs the stock Omarchy updater (Claude, Codex, Fireworks)
-3. Runs plugin-only collectors (`cursor`)
+3. Runs plugin-only collectors (`cursor`, `kiro`)
 
 You keep official collectors updated by `omarchy update` without editing `/usr/share/omarchy/`, while adding providers only in the fork.
 
@@ -78,8 +88,9 @@ Each agent is one JSON file in `~/.local/state/omarchy/agents/usage/`, written b
 | `codex` | Codex app-server RPC | native sessions + pi/omp/opencode |
 | `fireworks` | Estimated prepaid balance | billing API (last 30 days) |
 | **`cursor`** | **Monthly pools (Cursor Models + Other Models)** | **None** (plan limits only) |
+| **`kiro`** | **Monthly Kiro credits** | **None** (plan limits only) |
 
-Claude: `CLAUDE_CONFIG_DIR`. Codex: `CODEX_HOME`. Fireworks: `FIREWORKS_API_KEY`, `firectl`, opencode. Cursor: IDE or `cursor-agent`; overrides `CURSOR_DB_PATH` / `CURSOR_AGENT_AUTH_PATH`.
+Claude: `CLAUDE_CONFIG_DIR`. Codex: `CODEX_HOME`. Fireworks: `FIREWORKS_API_KEY`, `firectl`, opencode. Cursor: IDE or `cursor-agent`; overrides `CURSOR_DB_PATH` / `CURSOR_AGENT_AUTH_PATH`. Kiro: authenticated `kiro-cli`; override `KIRO_DB_PATH` when needed.
 
 ### Fireworks balance
 
@@ -100,14 +111,15 @@ omarchy bar set rafa.agents refreshIntervalSec 300 --json
 omarchy bar set rafa.agents syncDir '~/Sync/agent-usage'
 ```
 
-Per-provider enablement (includes `cursor`):
+Per-provider enablement (includes `cursor` and `kiro`):
 
 ```bash
 omarchy bar set rafa.agents providers '{
   "claude": { "enabled": true },
   "codex": { "enabled": true },
   "fireworks": { "enabled": true },
-  "cursor": { "enabled": true }
+  "cursor": { "enabled": true },
+  "kiro": { "enabled": true }
 }' --json
 ```
 
